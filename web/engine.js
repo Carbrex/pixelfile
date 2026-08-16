@@ -20,11 +20,19 @@ export function computeCRC32(data, prevCRC = 0) {
 }
 
 export function computeAdler32(data) {
-  let a = 1, b = 0;
+  let a = 1;
+  let b = 0;
   const MOD = 65521;
-  for (let i = 0; i < data.length; i++) {
-    a = (a + data[i]) % MOD;
-    b = (b + a) % MOD;
+  const len = data.length;
+  let i = 0;
+  while (i < len) {
+    const blockEnd = Math.min(i + 5552, len);
+    while (i < blockEnd) {
+      a += data[i++];
+      b += a;
+    }
+    a %= MOD;
+    b %= MOD;
   }
   return ((b << 16) | a) >>> 0;
 }
