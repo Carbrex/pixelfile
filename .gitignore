@@ -1,0 +1,18 @@
+# Binaries
+pixelfile
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test artifacts & temp files
+*.test
+*.out
+*.png
+!assets/*.png
+*.tmp
+
+# OS / Editor artifacts
+.DS_Store
+.vscode/
+.idea/
