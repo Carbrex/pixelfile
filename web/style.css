@@ -634,3 +634,18 @@ body:not(.dark-theme) .moon-icon { display: block; }
 .hidden {
   display: none !important;
 }
+
+/* Spinner */
+.spinner {
+  width: 32px;
+  height: 32px;
+  margin: 0 auto 0.75rem;
+  border: 3px solid var(--border-subtle);
+  border-top-color: var(--accent-primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}

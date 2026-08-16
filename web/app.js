@@ -54,8 +54,17 @@ let currentEncodedResult = null;
 let currentDecodedResult = null;
 let currentSourceFile = null;
 let currentZoom = 1;
+let worker = null;
+let activeJobId = 0;
 
-// Format Bytes
+// Initialize Web Worker
+try {
+  worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
+} catch (e) {
+  console.warn('Worker initialization fallback to direct engine execution:', e);
+}
+
+// Helpers
 function formatBytes(bytes) {
   if (bytes === 0) return '0 B';
   const k = 1024;
@@ -64,9 +73,13 @@ function formatBytes(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
-// Format Hex
 function toHex(n) {
   return n.toString(16).padStart(2, '0').toUpperCase();
+}
+
+function showLoading(message) {
+  canvasEmptyPlaceholder.innerHTML = `<div class="spinner"></div><p>${message}</p>`;
+  canvasEmptyPlaceholder.classList.remove('hidden');
 }
 
 // 1. Theme Management
@@ -100,7 +113,7 @@ tabDecode.addEventListener('click', () => {
   panelEncode.classList.remove('active');
 });
 
-// 3. Dropzone Drag & Drop Setup
+// 3. Dropzone Setup
 function setupDropzone(dropzoneEl, fileInputEl, onFileSelect) {
   dropzoneEl.addEventListener('dragover', (e) => {
     e.preventDefault();
@@ -145,17 +158,51 @@ compressionSelect.addEventListener('change', async () => {
 async function processEncodeFile() {
   if (!currentSourceFile) return;
 
+  const jobId = ++activeJobId;
+  showLoading(`Processing ${currentSourceFile.name} (${formatBytes(currentSourceFile.size)})...`);
+
   try {
     const arrayBuffer = await currentSourceFile.arrayBuffer();
     const fileBytes = new Uint8Array(arrayBuffer);
     const aspectRatio = aspectRatioSelect.value;
     const mode = compressionSelect.value;
 
-    const result = await encodeFileToPNG(fileBytes, currentSourceFile.name, {
-      aspectRatio,
-      mode,
-      mimeType: currentSourceFile.type || 'application/octet-stream',
-    });
+    let result;
+
+    if (worker) {
+      result = await new Promise((resolve, reject) => {
+        const handler = (e) => {
+          if (e.data.id === jobId) {
+            worker.removeEventListener('message', handler);
+            if (e.data.success) {
+              resolve(e.data.result);
+            } else {
+              reject(new Error(e.data.error));
+            }
+          }
+        };
+        worker.addEventListener('message', handler);
+        worker.postMessage({
+          id: jobId,
+          type: 'encode',
+          payload: {
+            fileBytes,
+            filename: currentSourceFile.name,
+            options: {
+              aspectRatio,
+              mode,
+              mimeType: currentSourceFile.type || 'application/octet-stream',
+            }
+          }
+        }, [fileBytes.buffer]);
+      });
+    } else {
+      result = await encodeFileToPNG(fileBytes, currentSourceFile.name, {
+        aspectRatio,
+        mode,
+        mimeType: currentSourceFile.type || 'application/octet-stream',
+      });
+    }
 
     currentEncodedResult = result;
 
@@ -172,23 +219,32 @@ async function processEncodeFile() {
     // Render Canvas
     canvasEmptyPlaceholder.classList.add('hidden');
     canvasDimLabel.textContent = `${result.width} × ${result.height} px`;
-    pixelCanvas.width = result.width;
-    pixelCanvas.height = result.height;
+
+    const previewDim = result.previewDim || Math.min(1024, Math.max(result.width, result.height));
+    pixelCanvas.width = previewDim;
+    pixelCanvas.height = previewDim;
 
     const ctx = pixelCanvas.getContext('2d');
-    const imgData = new ImageData(new Uint8ClampedArray(result.rgbaBuffer.buffer), result.width, result.height);
-    ctx.putImageData(imgData, 0, 0);
+    if (result.previewSample) {
+      const imgData = new ImageData(new Uint8ClampedArray(result.previewSample.buffer), previewDim, previewDim);
+      ctx.putImageData(imgData, 0, 0);
+    } else {
+      // Fallback
+      ctx.fillStyle = '#1e293b';
+      ctx.fillRect(0, 0, previewDim, previewDim);
+    }
 
     resetCanvasZoom();
   } catch (err) {
-    alert('Error encoding file: ' + err.message);
+    canvasEmptyPlaceholder.innerHTML = `<p style="color:red">Error: ${err.message}</p>`;
+    canvasEmptyPlaceholder.classList.remove('hidden');
     console.error(err);
   }
 }
 
 // Download Encoded PNG
 downloadPNGBtn.addEventListener('click', () => {
-  if (!currentEncodedResult) return;
+  if (!currentEncodedResult || !currentEncodedResult.pngBytes) return;
   const blob = new Blob([currentEncodedResult.pngBytes], { type: 'image/png' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -217,7 +273,7 @@ zoomInBtn.addEventListener('click', () => setZoom(currentZoom * 1.5));
 zoomOutBtn.addEventListener('click', () => setZoom(currentZoom / 1.5));
 resetViewBtn.addEventListener('click', () => resetCanvasZoom());
 
-// 6. Interactive Pixel Inspector
+// 6. Pixel Inspector
 pixelCanvas.addEventListener('mousemove', (e) => {
   if (!currentEncodedResult) return;
   const rect = pixelCanvas.getBoundingClientRect();
@@ -228,27 +284,51 @@ pixelCanvas.addEventListener('mousemove', (e) => {
   const y = Math.floor((e.clientY - rect.top) * scaleY);
 
   if (x >= 0 && x < pixelCanvas.width && y >= 0 && y < pixelCanvas.height) {
-    const offset = (y * pixelCanvas.width + x) * 4;
-    const r = currentEncodedResult.rgbaBuffer[offset];
-    const g = currentEncodedResult.rgbaBuffer[offset + 1];
-    const b = currentEncodedResult.rgbaBuffer[offset + 2];
-    const a = currentEncodedResult.rgbaBuffer[offset + 3];
+    const ctx = pixelCanvas.getContext('2d');
+    const pixel = ctx.getImageData(x, y, 1, 1).data;
+    const [r, g, b, a] = pixel;
 
     inspectColorSwatch.style.backgroundColor = `rgba(${r}, ${g}, ${b}, ${a / 255})`;
     inspectCoord.textContent = `X:${x}, Y:${y}`;
     inspectRGBA.textContent = `${r}, ${g}, ${b}, ${a}`;
     inspectHEX.textContent = `#${toHex(r)}${toHex(g)}${toHex(b)}${toHex(a)}`;
-    inspectOffset.textContent = `byte ${offset}`;
+    inspectOffset.textContent = `px ${y * pixelCanvas.width + x}`;
   }
 });
 
 // 7. Decode Workflow
 setupDropzone(decodeDropzone, decodeFileInput, async (file) => {
+  const jobId = ++activeJobId;
+  decodeResultCard.classList.add('hidden');
+
   try {
     const arrayBuffer = await file.arrayBuffer();
     const pngBytes = new Uint8Array(arrayBuffer);
 
-    const result = await decodePNGToFile(pngBytes);
+    let result;
+    if (worker) {
+      result = await new Promise((resolve, reject) => {
+        const handler = (e) => {
+          if (e.data.id === jobId) {
+            worker.removeEventListener('message', handler);
+            if (e.data.success) {
+              resolve(e.data.result);
+            } else {
+              reject(new Error(e.data.error));
+            }
+          }
+        };
+        worker.addEventListener('message', handler);
+        worker.postMessage({
+          id: jobId,
+          type: 'decode',
+          payload: { pngBytes }
+        }, [pngBytes.buffer]);
+      });
+    } else {
+      result = await decodePNGToFile(pngBytes);
+    }
+
     currentDecodedResult = result;
 
     decodeFilename.textContent = result.metadata.filename;
@@ -267,7 +347,7 @@ setupDropzone(decodeDropzone, decodeFileInput, async (file) => {
 
 // Download Restored File
 downloadRestoredBtn.addEventListener('click', () => {
-  if (!currentDecodedResult) return;
+  if (!currentDecodedResult || !currentDecodedResult.data) return;
   const blob = new Blob([currentDecodedResult.data], {
     type: currentDecodedResult.metadata.mimeType || 'application/octet-stream',
   });
